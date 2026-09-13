@@ -30,6 +30,30 @@
 
 2. 依照專案中的設定安裝相依套件並啟動應用程式。
 
+### 詞彙管理功能 (Vocabulary Management CLI)
+
+Lernen-Deutsch 內建 SQLite 詞彙庫與間隔重複（Spaced Repetition）記憶系統，支援離線管理與進度追蹤：
+
+- **新增單詞：**
+  ```bash
+  python main.py vocab add [word] [translation] [difficulty]
+  # 範例：python main.py vocab add Apfel apple easy
+  ```
+- **單詞複習 (間隔重複練習)：**
+  ```bash
+  python main.py vocab review
+  ```
+- **列出詞彙：**
+  ```bash
+  python main.py vocab list
+  ```
+- **匯出詞彙為 CSV：**
+  ```bash
+  python main.py vocab export [filename.csv]
+  ```
+
+在互動對話模式中，亦可直接輸入 `vocab`、`vocab add ...`、`vocab review` 或 `vocab export` 使用上述功能。
+
 ## 🤝 參與貢獻
 
 歡迎提交 Issue 或 Pull Request，一起改善開源德語學習體驗。
