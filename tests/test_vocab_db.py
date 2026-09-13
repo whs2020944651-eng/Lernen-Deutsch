@@ -227,3 +227,46 @@ def test_cli_handle_vocab_commands(temp_db, tmp_path):
     csv_dest = str(tmp_path / "cli_export.csv")
     assert main.handle_vocab_command(f"vocab export {csv_dest}", db_path=temp_db) is True
     assert os.path.exists(csv_dest)
+
+
+def test_add_word_case_insensitive_dedup(temp_db):
+    """Test case-insensitive deduplication in add_word."""
+    w1 = vocab_db.add_word("apfel", "apple", difficulty="medium", db_path=temp_db)
+    w2 = vocab_db.add_word("Apfel", "green apple", difficulty="easy", db_path=temp_db)
+
+    # Verify ID is preserved and frequency incremented
+    assert w1["id"] == w2["id"]
+    assert w2["translation"] == "green apple"
+    assert w2["difficulty"] == "easy"
+    assert w2["frequency"] == 2
+
+    words = vocab_db.list_words(db_path=temp_db)
+    assert len(words) == 1
+
+
+def test_cli_multiword_and_stats(temp_db):
+    """Test multi-word quoted argument parsing and vocab stats CLI command."""
+    assert main.handle_vocab_command('vocab add "Guten Morgen" "Good morning" easy', db_path=temp_db) is True
+    entry = vocab_db.get_word("Guten Morgen", db_path=temp_db)
+    assert entry is not None
+    assert entry["translation"] == "Good morning"
+    assert entry["difficulty"] == "easy"
+
+    # Test list tokens directly from sys.argv
+    assert main.handle_vocab_command(["vocab", "add", "essen", "to eat"], db_path=temp_db) is True
+    entry2 = vocab_db.get_word("essen", db_path=temp_db)
+    assert entry2 is not None
+    assert entry2["translation"] == "to eat"
+
+    # Test vocab stats command
+    assert main.handle_vocab_command("vocab stats", db_path=temp_db) is True
+
+
+def test_review_synonyms_and_articles(temp_db):
+    """Test that review answers recognize synonyms and normalized articles."""
+    vocab_db.add_word("der Apfel", "an apple, apple", db_path=temp_db)
+    with patch("builtins.input", return_value="apple"):
+        assert main.handle_vocab_command("vocab review", db_path=temp_db) is True
+
+    word = vocab_db.get_word("der Apfel", db_path=temp_db)
+    assert word["review_count"] == 1

@@ -7,6 +7,8 @@ Features SQLite database for vocabulary management and progress tracking.
 """
 
 import os
+import re
+import shlex
 import sqlite3
 import sys
 from dotenv import load_dotenv
@@ -50,11 +52,12 @@ def init_database(db_path=DB_PATH):
     conn.close()
 
 
-def add_vocabulary(word, translation, part_of_speech="", example="", db_path=DB_PATH):
+def add_vocabulary(word, translation, difficulty="medium", part_of_speech="", example="", db_path=DB_PATH):
     """Add or update vocabulary word in database."""
     return vocab_db.add_word(
         word=word,
         translation=translation,
+        difficulty=difficulty,
         part_of_speech=part_of_speech,
         example=example,
         db_path=db_path,
@@ -148,12 +151,20 @@ def display_welcome():
     print(welcome_text)
 
 
-def handle_vocab_command(command_str, db_path=DB_PATH):
+def handle_vocab_command(command_or_args, db_path=DB_PATH):
     """
     Handle vocabulary management subcommands.
+    Accepts command string or list of argument tokens.
     Returns True if handled, False otherwise.
     """
-    parts = command_str.strip().split()
+    if isinstance(command_or_args, list):
+        parts = [str(p) for p in command_or_args]
+    else:
+        try:
+            parts = shlex.split(command_or_args.strip())
+        except ValueError:
+            parts = command_or_args.strip().split()
+
     if not parts or parts[0].lower() != "vocab":
         return False
 
@@ -177,11 +188,21 @@ def handle_vocab_command(command_str, db_path=DB_PATH):
         if len(parts) < 4:
             print("\n❌ Usage: vocab add <word> <translation> [difficulty]\n")
             return True
+
         word = parts[2]
-        translation = parts[3]
-        difficulty = parts[4] if len(parts) > 4 else "medium"
-        entry = add_vocabulary(word, translation, db_path=db_path)
-        vocab_db.update_word(word, difficulty=difficulty, db_path=db_path)
+        rem = parts[3:]
+        if len(rem) > 1 and rem[-1].lower() in {"easy", "medium", "hard"}:
+            difficulty = rem[-1].lower()
+            translation = " ".join(rem[:-1])
+        else:
+            if len(rem) == 1 and rem[0].lower() in {"easy", "medium", "hard"}:
+                difficulty = "medium"
+                translation = rem[0]
+            else:
+                difficulty = "medium"
+                translation = " ".join(rem)
+
+        add_vocabulary(word, translation, difficulty=difficulty, db_path=db_path)
         print(f"\n✅ Added '{word}' ({translation}) [Difficulty: {difficulty}] to vocabulary!\n")
         return True
 
@@ -195,7 +216,7 @@ def handle_vocab_command(command_str, db_path=DB_PATH):
         print("──────────────────────────────────────────────────")
         for i, item in enumerate(words_to_review, 1):
             target_word = item["word"]
-            expected = item["translation"].strip().lower()
+            expected = item["translation"].strip()
             diff = item.get("difficulty", "medium")
             print(f"[{i}/{len(words_to_review)}] What is the translation of: '{target_word}' (Difficulty: {diff})?")
             try:
@@ -204,7 +225,11 @@ def handle_vocab_command(command_str, db_path=DB_PATH):
                 print("\nReview cancelled.\n")
                 return True
 
-            is_correct = ans.lower() == expected
+            cleaned_ans = re.sub(r'^(the|a|an|der|die|das|den|dem|des|ein|eine|einen|einem|einer)\s+', '', ans.lower()).strip()
+            candidates = [p.strip().lower() for p in re.split(r'[,;/]', expected) if p.strip()]
+            cleaned_candidates = [re.sub(r'^(the|a|an|der|die|das|den|dem|des|ein|eine|einen|einem|einer)\s+', '', c).strip() for c in candidates]
+
+            is_correct = (ans.lower() in candidates) or (cleaned_ans and cleaned_ans in cleaned_candidates) or (ans.lower() == expected.lower())
             vocab_db.record_review(target_word, success=is_correct, db_path=db_path)
             if is_correct:
                 print(f"   ✅ Correct! ('{target_word}' = '{item['translation']}')\n")
@@ -220,8 +245,18 @@ def handle_vocab_command(command_str, db_path=DB_PATH):
         print(f"\n📁 Vocabulary exported successfully to: {path}\n")
         return True
 
+    elif subcommand in ["stats", "info"]:
+        stats = vocab_db.get_vocabulary_stats(db_path=db_path)
+        print("\n📊 Vocabulary Learning Statistics:")
+        print(f"  • Total Words: {stats['total_words']}")
+        print(f"  • Reviewed Words: {stats['reviewed_words']}")
+        diff_counts = stats.get("difficulty_counts", {})
+        diff_str = ", ".join(f"{k.capitalize()}: {v}" for k, v in sorted(diff_counts.items())) or "None"
+        print(f"  • Difficulty Breakdown: {diff_str}\n")
+        return True
+
     else:
-        print(f"\n❌ Unknown vocab command: {subcommand}. Available: list, add, review, export\n")
+        print(f"\n❌ Unknown vocab command: {subcommand}. Available: list, add, review, export, stats\n")
         return True
 
 
@@ -230,7 +265,7 @@ def main():
     # Support standalone CLI execution of vocabulary commands without requiring API key
     if len(sys.argv) > 1 and sys.argv[1].lower() == "vocab":
         init_database()
-        handle_vocab_command(" ".join(sys.argv[1:]))
+        handle_vocab_command(sys.argv[1:])
         return
 
     # Check API key for chat session

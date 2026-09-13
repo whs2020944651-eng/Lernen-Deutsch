@@ -33,7 +33,7 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS vocabulary (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            word TEXT UNIQUE NOT NULL,
+            word TEXT UNIQUE NOT NULL COLLATE NOCASE,
             translation TEXT NOT NULL,
             difficulty TEXT DEFAULT 'medium',
             last_reviewed TIMESTAMP,
@@ -85,6 +85,7 @@ def add_word(
 ) -> Dict[str, Any]:
     """
     Add a new vocabulary word or update existing word translation and difficulty.
+    Handles case-insensitive deduplication safely.
     """
     word = word.strip()
     translation = translation.strip()
@@ -101,26 +102,32 @@ def add_word(
     conn = get_connection(db_path)
     cursor = conn.cursor()
 
-    try:
-        cursor.execute("""
-            INSERT INTO vocabulary (word, translation, difficulty, part_of_speech, example)
-            VALUES (?, ?, ?, ?, ?)
-        """, (word, translation, difficulty, part_of_speech.strip(), example.strip()))
-    except sqlite3.IntegrityError:
+    cursor.execute("SELECT id FROM vocabulary WHERE LOWER(word) = LOWER(?)", (word,))
+    existing = cursor.fetchone()
+
+    if existing:
         cursor.execute("""
             UPDATE vocabulary
-            SET translation = ?,
+            SET word = ?,
+                translation = ?,
                 difficulty = ?,
                 frequency = frequency + 1,
                 part_of_speech = CASE WHEN ? != '' THEN ? ELSE part_of_speech END,
                 example = CASE WHEN ? != '' THEN ? ELSE example END,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE word = ?
-        """, (translation, difficulty, part_of_speech.strip(), part_of_speech.strip(),
-              example.strip(), example.strip(), word))
+            WHERE id = ?
+        """, (word, translation, difficulty, part_of_speech.strip(), part_of_speech.strip(),
+              example.strip(), example.strip(), existing["id"]))
+        word_id = existing["id"]
+    else:
+        cursor.execute("""
+            INSERT INTO vocabulary (word, translation, difficulty, part_of_speech, example)
+            VALUES (?, ?, ?, ?, ?)
+        """, (word, translation, difficulty, part_of_speech.strip(), example.strip()))
+        word_id = cursor.lastrowid
 
     conn.commit()
-    cursor.execute("SELECT * FROM vocabulary WHERE word = ?", (word,))
+    cursor.execute("SELECT * FROM vocabulary WHERE id = ?", (word_id,))
     row = cursor.fetchone()
     result = dict(row) if row else {}
     conn.close()
