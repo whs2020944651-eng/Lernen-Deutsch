@@ -7,10 +7,13 @@ Features SQLite database for vocabulary management and progress tracking.
 """
 
 import os
+import re
+import shlex
 import sqlite3
 import sys
 from dotenv import load_dotenv
 from openai import OpenAI
+import vocab_db
 
 # Load environment variables
 load_dotenv()
@@ -19,24 +22,11 @@ load_dotenv()
 DB_PATH = "vocabulary.db"
 
 
-def init_database():
-    """Initialize SQLite database for vocabulary management."""
-    conn = sqlite3.connect(DB_PATH)
+def init_database(db_path=DB_PATH):
+    """Initialize SQLite database for vocabulary management and conversations."""
+    vocab_db.init_db(db_path)
+    conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-    
-    # Create tables if they don't exist
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS vocabulary (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            word TEXT UNIQUE NOT NULL,
-            translation TEXT NOT NULL,
-            part_of_speech TEXT,
-            example TEXT,
-            frequency INTEGER DEFAULT 1,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
     
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS conversation_history (
@@ -62,48 +52,27 @@ def init_database():
     conn.close()
 
 
-def add_vocabulary(word, translation, part_of_speech="", example=""):
+def add_vocabulary(word, translation, difficulty="medium", part_of_speech="", example="", db_path=DB_PATH):
     """Add or update vocabulary word in database."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    try:
-        cursor.execute("""
-            INSERT INTO vocabulary (word, translation, part_of_speech, example)
-            VALUES (?, ?, ?, ?)
-        """, (word, translation, part_of_speech, example))
-    except sqlite3.IntegrityError:
-        # Word already exists, update frequency
-        cursor.execute("""
-            UPDATE vocabulary 
-            SET frequency = frequency + 1, updated_at = CURRENT_TIMESTAMP
-            WHERE word = ?
-        """, (word,))
-    
-    conn.commit()
-    conn.close()
+    return vocab_db.add_word(
+        word=word,
+        translation=translation,
+        difficulty=difficulty,
+        part_of_speech=part_of_speech,
+        example=example,
+        db_path=db_path,
+    )
 
 
-def get_vocabulary_list(limit=10):
+def get_vocabulary_list(limit=10, db_path=DB_PATH):
     """Retrieve vocabulary words from database."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-        SELECT word, translation, frequency 
-        FROM vocabulary 
-        ORDER BY frequency DESC 
-        LIMIT ?
-    """, (limit,))
-    words = cursor.fetchall()
-    conn.close()
-    
-    return words
+    words = vocab_db.list_words(limit=limit, sort_by="frequency", db_path=db_path)
+    return [(w["word"], w["translation"], w.get("frequency", 1)) for w in words]
 
 
-def get_vocabulary_stats():
+def get_vocabulary_stats(db_path=DB_PATH):
     """Get vocabulary statistics."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     
     cursor.execute("SELECT COUNT(*) FROM vocabulary")
@@ -113,13 +82,12 @@ def get_vocabulary_stats():
     total_conversations = cursor.fetchone()[0]
     
     conn.close()
-    
     return total_words, total_conversations
 
 
-def save_conversation(user_message, assistant_response):
+def save_conversation(user_message, assistant_response, db_path=DB_PATH):
     """Save conversation to database for learning history."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     
     word_count = len(user_message.split())
@@ -155,15 +123,21 @@ def display_welcome():
   1. Type in German - any level is welcome!
   2. Get immediate corrections and explanations
   3. Continue practicing to improve your skills
-  4. Type 'vocab' to see your learned words
-  5. Type 'stats' to view your progress
-  6. Type 'exit' or 'quit' to finish
+  4. Type 'vocab' or 'vocab list' to see your learned words
+  5. Type 'vocab add [word] [translation]' to add words directly
+  6. Type 'vocab review' to practice spaced repetition
+  7. Type 'vocab export' to export vocabulary to CSV
+  8. Type 'stats' to view your progress
+  9. Type 'exit' or 'quit' to finish
 
 📖 COMMANDS:
-  • 'vocab'  - Show your learned vocabulary (top 10)
-  • 'stats'  - Display learning statistics
-  • 'exit'   - End the session
-  • 'quit'   - End the session
+  • 'vocab'                           - Show your learned vocabulary (top 10)
+  • 'vocab add <word> <translation>'  - Add new vocabulary word
+  • 'vocab review'                    - Practice vocabulary via spaced repetition
+  • 'vocab export [file.csv]'         - Export vocabulary as CSV file
+  • 'stats'                           - Display learning statistics
+  • 'exit'                            - End the session
+  • 'quit'                            - End the session
 
 💡 TIPS:
   ✓ Don't worry about mistakes - that's how you learn!
@@ -177,9 +151,124 @@ def display_welcome():
     print(welcome_text)
 
 
+def handle_vocab_command(command_or_args, db_path=DB_PATH):
+    """
+    Handle vocabulary management subcommands.
+    Accepts command string or list of argument tokens.
+    Returns True if handled, False otherwise.
+    """
+    if isinstance(command_or_args, list):
+        parts = [str(p) for p in command_or_args]
+    else:
+        try:
+            parts = shlex.split(command_or_args.strip())
+        except ValueError:
+            parts = command_or_args.strip().split()
+
+    if not parts or parts[0].lower() != "vocab":
+        return False
+
+    subcommand = parts[1].lower() if len(parts) > 1 else "list"
+
+    if subcommand in ["list", "show"]:
+        limit = 10
+        if len(parts) > 2 and parts[2].isdigit():
+            limit = int(parts[2])
+        words = get_vocabulary_list(limit=limit, db_path=db_path)
+        if words:
+            print(f"\n📖 Your Learned Vocabulary (Top {len(words)}):")
+            for i, (word, translation, freq) in enumerate(words, 1):
+                print(f"  {i}. {word} ({translation}) - Frequency: {freq}")
+            print()
+        else:
+            print("\n📖 No vocabulary learned yet. Keep practicing!\n")
+        return True
+
+    elif subcommand == "add":
+        if len(parts) < 4:
+            print("\n❌ Usage: vocab add <word> <translation> [difficulty]\n")
+            return True
+
+        word = parts[2]
+        rem = parts[3:]
+        if len(rem) > 1 and rem[-1].lower() in {"easy", "medium", "hard"}:
+            difficulty = rem[-1].lower()
+            translation = " ".join(rem[:-1])
+        else:
+            if len(rem) == 1 and rem[0].lower() in {"easy", "medium", "hard"}:
+                difficulty = "medium"
+                translation = rem[0]
+            else:
+                difficulty = "medium"
+                translation = " ".join(rem)
+
+        add_vocabulary(word, translation, difficulty=difficulty, db_path=db_path)
+        print(f"\n✅ Added '{word}' ({translation}) [Difficulty: {difficulty}] to vocabulary!\n")
+        return True
+
+    elif subcommand == "review":
+        words_to_review = vocab_db.get_words_for_review(limit=5, db_path=db_path)
+        if not words_to_review:
+            print("\n📖 No vocabulary available to review. Add words with 'vocab add' first!\n")
+            return True
+
+        print(f"\n🧠 Spaced Repetition Review ({len(words_to_review)} words):")
+        print("──────────────────────────────────────────────────")
+        for i, item in enumerate(words_to_review, 1):
+            target_word = item["word"]
+            expected = item["translation"].strip()
+            diff = item.get("difficulty", "medium")
+            print(f"[{i}/{len(words_to_review)}] What is the translation of: '{target_word}' (Difficulty: {diff})?")
+            try:
+                ans = input("   Your translation: ").strip()
+            except (KeyboardInterrupt, EOFError):
+                print("\nReview cancelled.\n")
+                return True
+
+            cleaned_ans = re.sub(r'^(the|a|an|der|die|das|den|dem|des|ein|eine|einen|einem|einer)\s+', '', ans.lower()).strip()
+            candidates = [p.strip().lower() for p in re.split(r'[,;/]', expected) if p.strip()]
+            cleaned_candidates = [re.sub(r'^(the|a|an|der|die|das|den|dem|des|ein|eine|einen|einem|einer)\s+', '', c).strip() for c in candidates]
+
+            is_correct = (ans.lower() in candidates) or (cleaned_ans and cleaned_ans in cleaned_candidates) or (ans.lower() == expected.lower())
+            vocab_db.record_review(target_word, success=is_correct, db_path=db_path)
+            if is_correct:
+                print(f"   ✅ Correct! ('{target_word}' = '{item['translation']}')\n")
+            else:
+                print(f"   ❌ Incorrect. Expected: '{item['translation']}'. We will review this again soon!\n")
+
+        print("🎉 Review session complete!\n")
+        return True
+
+    elif subcommand == "export":
+        export_file = parts[2] if len(parts) > 2 else "vocabulary_export.csv"
+        path = vocab_db.export_csv(file_path=export_file, db_path=db_path)
+        print(f"\n📁 Vocabulary exported successfully to: {path}\n")
+        return True
+
+    elif subcommand in ["stats", "info"]:
+        stats = vocab_db.get_vocabulary_stats(db_path=db_path)
+        print("\n📊 Vocabulary Learning Statistics:")
+        print(f"  • Total Words: {stats['total_words']}")
+        print(f"  • Reviewed Words: {stats['reviewed_words']}")
+        diff_counts = stats.get("difficulty_counts", {})
+        diff_str = ", ".join(f"{k.capitalize()}: {v}" for k, v in sorted(diff_counts.items())) or "None"
+        print(f"  • Difficulty Breakdown: {diff_str}\n")
+        return True
+
+    else:
+        print(f"\n❌ Unknown vocab command: {subcommand}. Available: list, add, review, export, stats\n")
+        return True
+
+
 def main():
     """Main entry point for the tutoring agent."""
-    # Check API key
+    # Support standalone CLI execution of vocabulary commands without requiring API key
+    if len(sys.argv) > 1 and sys.argv[1].lower() == "vocab":
+        init_database()
+        handle_vocab_command(sys.argv[1:])
+        return
+
+    # Check API key for chat session
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         print("❌ Error: OPENAI_API_KEY not found in environment variables")
@@ -187,6 +276,10 @@ def main():
         print("  export OPENAI_API_KEY='your-key-here'")
         print("\nOr create a .env file with:")
         print("  OPENAI_API_KEY=your-key-here")
+        print("\nNote: You can still run vocabulary CLI commands offline:")
+        print("  python main.py vocab add <word> <translation>")
+        print("  python main.py vocab review")
+        print("  python main.py vocab export")
         sys.exit(1)
     
     # Initialize OpenAI client
@@ -226,15 +319,9 @@ Format corrections clearly so the user can learn from their mistakes."""
                 print("\nAuf Wiedersehen! Bis zum nächsten Mal! 👋")
                 break
             
-            if user_input.lower() == "vocab":
-                words = get_vocabulary_list()
-                if words:
-                    print("\n📖 Your Learned Vocabulary (Top 10):")
-                    for i, (word, translation, freq) in enumerate(words, 1):
-                        print(f"  {i}. {word} ({translation}) - Frequency: {freq}")
-                    print()
-                else:
-                    print("\n📖 No vocabulary learned yet. Keep practicing!\n")
+            # Handle vocab commands (e.g. 'vocab', 'vocab add ...', 'vocab review', 'vocab export')
+            if user_input.lower().startswith("vocab"):
+                handle_vocab_command(user_input)
                 continue
             
             if user_input.lower() == "stats":
